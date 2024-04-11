@@ -4,6 +4,7 @@ import torch
 import argparse
 from torch.nn import functional as F
 import warnings
+
 warnings.filterwarnings("ignore")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -12,14 +13,13 @@ if torch.cuda.is_available():
     torch.backends.cudnn.enabled = True
     torch.backends.cudnn.benchmark = True
 
-parser = argparse.ArgumentParser(description='Interpolation for a pair of images')
-parser.add_argument('--img', dest='img', nargs=2, required=True)
-parser.add_argument('--exp', default=4, type=int)
-parser.add_argument('--ratio', default=0, type=float, help='inference ratio between two images with 0 - 1 range')
-parser.add_argument('--rthreshold', default=0.02, type=float, help='returns image when actual ratio falls in given range threshold')
-parser.add_argument('--rmaxcycles', default=8, type=int, help='limit max number of bisectional cycles')
-parser.add_argument('--model', dest='modelDir', type=str, default='train_log', help='directory with trained model files')
-
+parser = argparse.ArgumentParser(description='Interpolation for a folder of frames')
+parser.add_argument('--frame_folder', dest='frame_folder', type=str, required=True,
+                    help='Path to the folder containing frames')
+parser.add_argument('--exp', default=4, type=int,
+                    help='Expansion factor for interpolation (default: 4)')
+parser.add_argument('--model', dest='modelDir', type=str, default='train_log',
+                    help='Directory with trained model files')
 args = parser.parse_args()
 
 try:
@@ -47,65 +47,39 @@ except:
 model.eval()
 model.device()
 
-if args.img[0].endswith('.exr') and args.img[1].endswith('.exr'):
-    img0 = cv2.imread(args.img[0], cv2.IMREAD_COLOR | cv2.IMREAD_ANYDEPTH)
-    img1 = cv2.imread(args.img[1], cv2.IMREAD_COLOR | cv2.IMREAD_ANYDEPTH)
-    img0 = (torch.tensor(img0.transpose(2, 0, 1)).to(device)).unsqueeze(0)
-    img1 = (torch.tensor(img1.transpose(2, 0, 1)).to(device)).unsqueeze(0)
+frame_files = sorted(os.listdir(args.frame_folder))
 
-else:
-    img0 = cv2.imread(args.img[0], cv2.IMREAD_UNCHANGED)
-    img1 = cv2.imread(args.img[1], cv2.IMREAD_UNCHANGED)
-    img0 = (torch.tensor(img0.transpose(2, 0, 1)).to(device) / 255.).unsqueeze(0)
-    img1 = (torch.tensor(img1.transpose(2, 0, 1)).to(device) / 255.).unsqueeze(0)
+output_folder = "output"
+os.makedirs(output_folder, exist_ok=True)
 
-n, c, h, w = img0.shape
-ph = ((h - 1) // 32 + 1) * 32
-pw = ((w - 1) // 32 + 1) * 32
-padding = (0, pw - w, 0, ph - h)
-img0 = F.pad(img0, padding)
-img1 = F.pad(img1, padding)
+for i in range(len(frame_files) - 1):
+    frame1_path = os.path.join(args.frame_folder, frame_files[i])
+    frame2_path = os.path.join(args.frame_folder, frame_files[i + 1])
 
+    frame1 = cv2.imread(frame1_path, cv2.IMREAD_UNCHANGED)
+    frame2 = cv2.imread(frame2_path, cv2.IMREAD_UNCHANGED)
+    img0 = (torch.tensor(frame1.transpose(2, 0, 1)).to(device) / 255.).unsqueeze(0)
+    img1 = (torch.tensor(frame2.transpose(2, 0, 1)).to(device) / 255.).unsqueeze(0)
 
-if args.ratio:
-    img_list = [img0]
-    img0_ratio = 0.0
-    img1_ratio = 1.0
-    if args.ratio <= img0_ratio + args.rthreshold / 2:
-        middle = img0
-    elif args.ratio >= img1_ratio - args.rthreshold / 2:
-        middle = img1
-    else:
-        tmp_img0 = img0
-        tmp_img1 = img1
-        for inference_cycle in range(args.rmaxcycles):
-            middle = model.inference(tmp_img0, tmp_img1)
-            middle_ratio = ( img0_ratio + img1_ratio ) / 2
-            if args.ratio - (args.rthreshold / 2) <= middle_ratio <= args.ratio + (args.rthreshold / 2):
-                break
-            if args.ratio > middle_ratio:
-                tmp_img0 = middle
-                img0_ratio = middle_ratio
-            else:
-                tmp_img1 = middle
-                img1_ratio = middle_ratio
-    img_list.append(middle)
-    img_list.append(img1)
-else:
+    n, c, h, w = img0.shape
+    ph = ((h - 1) // 32 + 1) * 32
+    pw = ((w - 1) // 32 + 1) * 32
+    padding = (0, pw - w, 0, ph - h)
+    img0 = F.pad(img0, padding)
+    img1 = F.pad(img1, padding)
+
     img_list = [img0, img1]
-    for i in range(args.exp):
+    for j in range(args.exp):
         tmp = []
-        for j in range(len(img_list) - 1):
-            mid = model.inference(img_list[j], img_list[j + 1])
-            tmp.append(img_list[j])
+        for k in range(len(img_list) - 1):
+            mid = model.inference(img_list[k], img_list[k + 1])
+            tmp.append(img_list[k])
             tmp.append(mid)
         tmp.append(img1)
         img_list = tmp
 
-if not os.path.exists('output'):
-    os.mkdir('output')
-for i in range(len(img_list)):
-    if args.img[0].endswith('.exr') and args.img[1].endswith('.exr'):
-        cv2.imwrite('output/img{}.exr'.format(i), (img_list[i][0]).cpu().numpy().transpose(1, 2, 0)[:h, :w], [cv2.IMWRITE_EXR_TYPE, cv2.IMWRITE_EXR_TYPE_HALF])
-    else:
-        cv2.imwrite('output/img{}.png'.format(i), (img_list[i][0] * 255).byte().cpu().numpy().transpose(1, 2, 0)[:h, :w])
+    for j in range(len(img_list)):
+        cv2.imwrite(os.path.join(output_folder, 'frame{}_{}.png'.format(i, j)),
+                    (img_list[j][0] * 255).byte().cpu().numpy().transpose(1, 2, 0)[:h, :w])
+
+print("Interpolation completed. Generated frames are saved in the output folder.")
